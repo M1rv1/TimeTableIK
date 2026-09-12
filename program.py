@@ -1,0 +1,999 @@
+from pathlib import Path
+from shutil import rmtree
+from ortools.sat.python import cp_model
+from openpyxl import Workbook
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
+from openpyxl.utils import get_column_letter
+from random import shuffle
+
+def making_diap(l): #Исправление диапозонов
+    out =  []
+    for st in l:
+        cur = []
+        if '-' in st:
+            h = st.split('-')
+            for n in range(int(h[0]), int(h[1]) + 1):
+                cur.append(int(n)) # Переводим в целое число
+        else:
+            cur = [int(st)] # Переводим в целое число
+        out += cur
+    return out
+
+def getting_possible_vars(fr, lessons):
+    ans = []
+    if lessons == 1:
+        all_vars_in_election = []
+        for day in fr:
+            for hour in fr[day]:
+                if fr[day][hour]: 
+                    all_vars_in_election.append(fr[day][hour])
+        all_vars_in_election = list(set(all_vars_in_election))
+        all_vars_in_election.sort()
+
+        days_of_week = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб']
+        
+
+        target = all_vars_in_election[-1]
+        shuffle(days_of_week)
+        for d in days_of_week:
+            for hour in fr[d]:
+                if len(ans) == 10:
+                    return ans
+                if fr[d][hour] == target:
+                    ans.append([[d, hour + ':00'], [d, hour + ':00']])
+        if len(all_vars_in_election) > 1:
+            target = all_vars_in_election[-2]
+            shuffle(days_of_week)
+            for d in days_of_week:
+                for hour in fr[d]:
+                    if len(ans) == 10:
+                        return ans
+                    if fr[d][hour] == target:
+                        ans.append([[d, hour + ':00'], [d, hour + ':00']])
+        if len(all_vars_in_election) > 2:
+            target = all_vars_in_election[-3]
+            shuffle(days_of_week)
+            for d in days_of_week:
+                for hour in fr[d]:
+                    if len(ans) == 10:
+                        return ans
+                    if fr[d][hour] == target:
+                        ans.append([[d, hour + ':00'], [d, hour + ':00']])
+        return ans
+    elif lessons == 2:
+        days_of_week = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб']
+        all_pairs = []
+        
+        # Проходим по индексам дней недели, чтобы жестко контролировать разницу в днях
+        for i in range(len(days_of_week)):
+            d1 = days_of_week[i]
+            for h1 in fr[d1]:
+                # Отсекаем часы, которые никто не выбрал
+                if fr[d1][h1] == 0:
+                    continue
+                
+                # Второй цикл начинается минимум через 2 дня (i + 2) от первого занятия
+                for j in range(i + 2, len(days_of_week)):
+                    d2 = days_of_week[j]
+                    for h2 in fr[d2]:
+                        # Отсекаем часы, которые никто не выбрал
+                        if fr[d2][h2] == 0:
+                            continue
+                            
+                        # Считаем общую популярность пары
+                        total_votes = fr[d1][h1] + fr[d2][h2]
+                        # Находим "слабое звено" — минимальный голос в паре
+                        min_votes = min(fr[d1][h1], fr[d2][h2])
+                        
+                        all_pairs.append((total_votes, min_votes, [d1, h1 + ':00'], [d2, h2 + ':00']))
+                        
+        # Сортируем: сначала по общей сумме голосов, затем балансируем по минимальному голосу
+        all_pairs.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        
+        # Отбираем 3 наилучших уникальных варианта
+        for item in all_pairs:
+            if len(ans) == 4:
+                break
+            ans.append([item[2], item[3]])
+            
+        return ans
+
+# Помощь в переводе из 120 минут условных в строчный 18:00 + 2:00 условный
+def get_minutes(t_str):
+        if ":" in str(t_str):
+            h, m = map(int, str(t_str).split(":"))
+            return h * 60 + m
+        return int(t_str) * 60
+###
+def get_rid_off_letters(st):
+    out = ""
+    for char in st:
+        if char in '0123456789':
+            out += char
+    return int(out)
+
+def get_plus_time(time_str, add_int):
+    celaya = int(time_str[0] + time_str[1])
+    necelaya =  int(time_str[3] + time_str[4])
+
+    plus_to_celaya = add_int // 60
+    plus_to_necelaya = add_int % 60
+
+    if necelaya + plus_to_necelaya < 60:
+        out = f'{celaya + plus_to_celaya}:{necelaya + plus_to_necelaya}'
+        if len(out) == 4:
+                    return out + '0'
+        return out
+    else:
+        out = f'{celaya + plus_to_celaya + (necelaya + plus_to_necelaya) // 60}:{(necelaya + plus_to_necelaya) % 60}'
+        if len(out) == 4:
+            return out + '0'
+        return out
+
+
+
+def get_required_hours(time_str, duration_mins):
+        if ":" in str(time_str):
+            h, m = map(int, str(time_str).split(":"))
+            start_mins = h * 60 + m
+        else:
+            start_mins = int(time_str) * 60
+            
+        end_mins = start_mins + duration_mins
+        start_hour = start_mins // 60
+        # Если занятие кончается ровно в 00 минут следующего часа, этот следующий час нам не нужен (-1 минута спасает)
+        end_hour = (end_mins - 1) // 60 
+        
+        return list(range(start_hour, end_hour + 1))
+
+#Создание  расписания
+def making_timetable(c, t, povtor_cr):
+    model = cp_model.CpModel() # Создание модели для перебора
+    # ----------------------------------------------
+    # 0. Инициализация мест для перебора 
+    # ----------------------------------------------
+    x = {}
+    for (name_of_group, val) in c.items():
+
+        name_teacher = val[0][0]
+        time_per_lesson = val[0][1] 
+        number_of_students = val[0][2]
+
+        for i in range(1, len(val)):
+            x[name_teacher, name_of_group, time_per_lesson, number_of_students, val[i][0][0], val[i][0][1], val[i][1][0], val[i][1][1]] = model.NewBoolVar(f"{name_teacher}_{name_of_group}_{time_per_lesson}_{number_of_students}_{val[i][0][0]}_{val[i][0][1]}_{val[i][1][0]}_{val[i][1][1]}")
+
+    # ----------------------------------------------
+    # 1. Ограничения 
+    # ----------------------------------------------
+    
+    # 0) Что-то тут нужно уже сделать с povtor_cr - надо чтение с таблицы excel
+    from_group_to_teacher = {}
+    for group in c:
+        from_group_to_teacher[group] = c[group][0][0]
+
+    if povtor_cr:
+        folder = Path("Выходные данные")
+
+    # Проверяем, существует ли папка, и есть ли в ней хотя бы один файл Excel
+        if folder.is_dir() and any(folder.glob("IK-STUDY_TIMETABLE.xls*")):
+            wb = load_workbook("Выходные данные/IK-STUDY_TIMETABLE.xlsx", data_only=True)
+            wb.active = wb["Доп данные"]
+            # Берём активный лист или лист по имени: wb["Лист1"]
+            ws = wb.active
+            # Итерируемся по всем строкам таблицы
+            start_saving = False
+            all_saving = []
+            
+            for row in ws.iter_rows(values_only=True):
+                current_saving = []
+                if row[0] in t:
+                    start_saving = True
+                    continue
+                if start_saving:
+                    for word in row:
+                        if not current_saving:
+                            if word == None:
+                                continue
+                            elif 'мин' in word:
+                                current_saving.append(get_rid_off_letters(word))
+                            elif 'чел' in word:
+                                current_saving.append(get_rid_off_letters(word))
+                            elif ', ' in word:
+                                add = word.split(', ')
+                                current_saving.append(add[0])
+                                current_saving.append(add[1])
+                            else:
+                                current_saving.append(word)
+                        elif word == None:
+                            all_saving.append(current_saving)
+                            current_saving = []
+                        else:
+                            if 'мин' in word:
+                                current_saving.append(get_rid_off_letters(word))
+                            elif 'чел' in word:
+                                current_saving.append(get_rid_off_letters(word))
+                            elif ', ' in word:
+                                add = word.split(', ')
+                                current_saving.append(add[0])
+                                current_saving.append(add[1])
+                            else:
+                                current_saving.append(word)
+
+            all_savings_mega_last = []
+            for cur in all_saving:
+                cur.pop(-1)
+                all_savings_mega_last.append(tuple([from_group_to_teacher[cur[0]]] + cur))
+
+            for key in all_savings_mega_last:
+                model.Add(x[key] == 1)
+
+        else:
+            print(">Вы что-то перепутали расписания excel нет...")
+    ###
+    
+    # 1) Должно быть оди урок ровно в группе
+    for (name_of_group, val) in c.items():
+        name_teacher = val[0][0]
+        time_per_lesson = val[0][1] 
+        number_of_students = val[0][2]
+        model.Add(
+                    sum(
+                        x[name_teacher, name_of_group, time_per_lesson, number_of_students, val[i][0][0], val[i][0][1], val[i][1][0], val[i][1][1]]
+                        for i in range(1, len(val))
+                    ) == 1
+                )
+    ###
+    
+
+    # 2) + 3) Ограничения на одновременные занятия с учетом их длительности и кабинетов
+    BIG_GROUP_THRESHOLD = 9 # Порог для "большой" группы (только Большой кабинет)
+    MEDIUM_GROUP_THRESHOLD = 5 # Порог для средних групп (Большой или Малый кабинет)
+
+    # Собираем все уникальные точки старта занятий (день, минуты)
+    check_points = set()
+    for val in c.values():
+        for i in range(1, len(val)):
+            check_points.add((val[i][0][0], get_minutes(val[i][0][1])))
+            check_points.add((val[i][1][0], get_minutes(val[i][1][1])))
+
+    # Для каждой точки времени проверяем, какие занятия будут активно идти в этот момент
+    for current_day, current_minute in check_points:
+        lessons_at_this_moment = []
+        big_and_medium_lessons = []
+        big_lessons = []
+        
+        for (name_of_group, val) in c.items():
+            name_teacher = val[0][0]
+            time_per_lesson = val[0][1] 
+            number_of_students = val[0][2]
+            
+            for i in range(1, len(val)):
+                day1, time1_str = val[i][0][0], val[i][0][1]
+                day2, time2_str = val[i][1][0], val[i][1][1]
+                
+                start1 = get_minutes(time1_str)
+                end1 = start1 + time_per_lesson
+                
+                start2 = get_minutes(time2_str)
+                end2 = start2 + time_per_lesson
+                
+                is_active = False
+                if day1 == current_day and start1 <= current_minute < end1:
+                    is_active = True
+                if day2 == current_day and start2 <= current_minute < end2:
+                    is_active = True
+                    
+                if is_active:
+                    var = x[name_teacher, name_of_group, time_per_lesson, number_of_students, day1, time1_str, day2, time2_str]
+                    lessons_at_this_moment.append(var)
+                    
+                    if number_of_students >= MEDIUM_GROUP_THRESHOLD:
+                        big_and_medium_lessons.append(var)
+                        
+                    if number_of_students >= BIG_GROUP_THRESHOLD:
+                        big_lessons.append(var)
+        
+        # 1. Максимум 3 ЛЮБЫЕ группы одновременно (так как есть 3 кабинета)
+        if len(lessons_at_this_moment) > 3:
+            model.Add(sum(lessons_at_this_moment) <= 3)
+            
+        # 2. Максимум 2 группы от 5 человек и больше (они влезут только в Большой и Малый)
+        if len(big_and_medium_lessons) > 2:
+            model.Add(sum(big_and_medium_lessons) <= 2)
+            
+        # 3. Максимум 1 большая группа (она влезет только в Большой)
+        if len(big_lessons) > 1:
+            model.Add(sum(big_lessons) <= 1)
+    ###
+
+    # 4) Ограничения учителей - мало ли 
+    for (name_of_group, val) in c.items():
+        name_teacher = val[0][0]
+        time_per_lesson = val[0][1] 
+        number_of_students = val[0][2]
+        
+        # Берем расписание конкретного учителя. Если его вообще нет в t, выдаст пустой словарь {}
+        teacher_schedule = t.get(name_teacher, {})
+        
+        for i in range(1, len(val)):
+            day1, time1_str = val[i][0][0], val[i][0][1]
+            day2, time2_str = val[i][1][0], val[i][1][1]
+            
+            # Какие часы нужны для первого занятия
+            req_hours_1 = get_required_hours(time1_str, time_per_lesson)
+            # Какие часы реально свободны в этот день
+            avail_hours_1 = teacher_schedule.get(day1, [])
+            
+            # Какие часы нужны для второго занятия
+            req_hours_2 = get_required_hours(time2_str, time_per_lesson)
+            avail_hours_2 = teacher_schedule.get(day2, [])
+            
+            is_valid = True
+            
+            # Проверяем, что ВСЕ нужные часы для первого урока есть в свободных часах учителя
+            for h in req_hours_1:
+                if h not in avail_hours_1:
+                    is_valid = False
+                    break
+                    
+            # То же самое для второго урока
+            if is_valid:
+                for h in req_hours_2:
+                    if h not in avail_hours_2:
+                        is_valid = False
+                        break
+            
+            # Если хотя бы один час занятия выпадает на нерабочее время, запрещаем этот вариант
+            if not is_valid:
+                var = x[name_teacher, name_of_group, time_per_lesson, number_of_students, day1, time1_str, day2, time2_str]
+                model.Add(var == 0)
+    ### 
+
+    # 5) Учитель не может вести два урока одновременно
+    check_points_for_teachers = set()
+    for val in c.values():
+        for i in range(1, len(val)):
+            check_points_for_teachers.add((val[i][0][0], get_minutes(val[i][0][1])))
+            check_points_for_teachers.add((val[i][1][0], get_minutes(val[i][1][1])))
+
+    # Собираем учителей напрямую из классов, чтобы избежать любых несовпадений строк
+    names_of_teachers = set(val[0][0] for val in c.values())
+
+    for name in names_of_teachers:
+        for current_day, current_minute in check_points_for_teachers:
+            teacher_at_this_slot = []
+            
+            for (name_of_group, val) in c.items():
+                name_teacher = val[0][0]
+                # Пропускаем класс, если его ведет другой преподаватель
+                if name_teacher != name:
+                    continue 
+                    
+                time_per_lesson = val[0][1] # Длительность в минутах
+                number_of_students = val[0][2]
+                
+                for i in range(1, len(val)):
+                    day1, time1_str = val[i][0][0], val[i][0][1]
+                    day2, time2_str = val[i][1][0], val[i][1][1]
+
+                    start1 = get_minutes(time1_str)
+                    end1 = start1 + time_per_lesson
+
+                    start2 = get_minutes(time2_str)
+                    end2 = start2 + time_per_lesson
+                    
+                    active_count = 0
+                    
+                    # Идет ли первое занятие в эту минуту?
+                    if day1 == current_day and start1 <= current_minute < end1:
+                        active_count += 1
+                        
+                    # Идет ли второе занятие в эту минуту?
+                    if day2 == current_day and start2 <= current_minute < end2:
+                        # Исключение: если пользователь продублировал урок (1 раз в неделю)
+                        if not (day1 == day2 and time1_str == time2_str):
+                            active_count += 1
+
+                    # Если этот вариант расписания занимает учителя в данную минуту
+                    if active_count > 0:
+                        var = x[name_teacher, name_of_group, time_per_lesson, number_of_students, day1, time1_str, day2, time2_str]
+                        # Умножаем переменную на количество уроков (защита от внутренних нахлестов внутри одной группы)
+                        teacher_at_this_slot.append(active_count * var)
+            
+            # Добавляем ограничение только если список не пуст (ускоряет работу модели)
+            if teacher_at_this_slot:
+                model.Add(sum(teacher_at_this_slot) <= 1)
+    ###
+    # ----------------------------------------------
+    # 1.1 Оптимизация для введенных данных  
+    # ----------------------------------------------
+    # >>>Приоритет групп
+    objective_terms = []
+    for (name_of_group, val) in c.items():
+    
+            name_teacher = val[0][0]
+            time_per_lesson = val[0][1] 
+            number_of_students = val[0][2]
+
+            additional_weight_of_students = number_of_students
+    
+            for mn in range(1, len(val)):
+                var = x[name_teacher, name_of_group, time_per_lesson, number_of_students, val[mn][0][0], val[mn][0][1], val[mn][1][0], val[mn][1][1]]
+                total_weight = 16 * mn * additional_weight_of_students
+                objective_terms.append(total_weight * var)
+
+    # >>>Как можно больше уроков в один день
+    all_days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб']
+    all_teachers = set(val[0][0] for val in c.values())
+    
+    teacher_works_on_day = {}
+    for teacher in all_teachers:
+        for day in all_days:
+            teacher_works_on_day[teacher, day] = model.NewBoolVar(f'work_{teacher}_{day}')
+
+    # Связываем выбор расписания с рабочими днями
+    for (name_of_group, val) in c.items():
+        name_teacher = val[0][0]
+        time_per_lesson = val[0][1] 
+        number_of_students = val[0][2]
+        
+        for mn in range(1, len(val)):
+            day1, time1_str = val[mn][0][0], val[mn][0][1]
+            day2, time2_str = val[mn][1][0], val[mn][1][1]
+            var = x[name_teacher, name_of_group, time_per_lesson, number_of_students, day1, time1_str, day2, time2_str]
+            
+            # Если вариант выбран, учитель ОБЯЗАН выйти на работу в day1 и day2
+            model.AddImplication(var, teacher_works_on_day[name_teacher, day1])
+            model.AddImplication(var, teacher_works_on_day[name_teacher, day2])
+
+    DAY_PENALTY = 200
+    
+    for teacher in all_teachers:
+        for day in all_days:
+            # ПЛЮСУЕМ штраф за каждый рабочий день
+            objective_terms.append(DAY_PENALTY * teacher_works_on_day[teacher, day])
+# Минимизируем сумму весов, чтобы выбирать варианты с минимальным индексом mn (самые приоритетные)
+    model.Minimize(sum(objective_terms))
+
+    # ----------------------------------------------
+    # 2. Решение самой модели 
+    # ----------------------------------------------
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 180
+    solver.parameters.log_search_progress = True
+    solver.parameters.cp_model_presolve = True
+    solver.parameters.num_search_workers = 8
+    solver.parameters.linearization_level = 2
+    solver.parameters.cp_model_probing_level = 0
+    status = solver.Solve(model)
+    schedule = []
+    if status == cp_model.OPTIMAL:
+        print("Расписание составлено успешно, выбраны топы голосований!")
+        for (name_of_group, val) in c.items():
+            name_teacher = val[0][0]
+            time_per_lesson = val[0][1] 
+            number_of_students = val[0][2]
+            for i in range(1, len(val)):
+                if solver.Value(x[name_teacher, name_of_group, time_per_lesson, number_of_students, val[i][0][0], val[i][0][1], val[i][1][0], val[i][1][1]]) == 1:
+                    
+                    schedule.append([name_teacher, name_of_group, time_per_lesson, number_of_students, val[i][0], val[i][1], i])
+    elif status == cp_model.FEASIBLE:
+        print("Расписание составлено успешно, но есть сдвиги!")
+        
+        for (name_of_group, val) in c.items():
+            name_teacher = val[0][0]
+            time_per_lesson = val[0][1] 
+            number_of_students = val[0][2]
+            for i in range(1, len(val)):
+                if solver.Value(x[name_teacher, name_of_group, time_per_lesson, number_of_students, val[i][0][0], val[i][0][1], val[i][1][0], val[i][1][1]]) == 1:
+                    schedule.append([name_teacher, name_of_group, time_per_lesson, number_of_students, val[i][0], val[i][1], i])
+    else:
+        print('!Проблема с введенными данными!')
+        return []
+
+    return schedule
+
+# [['Маргарита', 'ЕГЭ мат полупрофи 1', 120, 7, ['Вт', '19:00'], ['Пт', '20:00'], 2]
+
+# Вывод в табличук excel
+def showing_timetable(sch, t):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Расписание"
+
+    # Создание скелета для дней недели
+    help_days_fully = { 
+                "Пн": ("Понедельник",  
+                       PatternFill(start_color='F0E68C', fill_type='solid') ,  
+                        Font(color='000000', size=13, bold = True), 1), 
+                "Вт": ("Вторник",  
+                       PatternFill(start_color='6A5ACD', fill_type='solid') ,  
+                        Font(color='000000', size=13, bold = True), 2), 
+                "Ср": ("Среда",  
+                       PatternFill(start_color='1E90FF', fill_type='solid') ,  
+                        Font(color='000000', size=13, bold = True), 3), 
+                "Чт": ("Четверг",  
+                       PatternFill(start_color='FF69B4', fill_type='solid') ,  
+                        Font(color='000000', size=13, bold = True), 4), 
+                "Пт": ("Пятница",  
+                       PatternFill(start_color='EE82EE', fill_type='solid') ,  
+                        Font(color='000000', size=13, bold = True), 5), 
+                "Сб": ("Суббота",  
+                       PatternFill(start_color='2E8B57', fill_type='solid') ,  
+                        Font(color='000000', size=13, bold = True), 6), 
+            } 
+
+    for idx, (day, fill, text, n) in enumerate(help_days_fully.values(), start=0): 
+    # Записываем день недели 
+        column_1 = get_column_letter(idx*5 + 1)
+        row = 1
+
+        cell = ws[f"{column_1}{row}"] 
+        cell.value = day 
+        cell.fill = fill  
+        cell.font = text 
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        ws.merge_cells(
+        start_row=1, 
+        start_column= idx*5 + 1, 
+        end_row=1, 
+        end_column= idx*5 + 4
+        )
+
+    ###
+
+    #Создание слов столбцов
+    for i in range(0, 6):
+        words = ['Группа', 'Время' , 'Учитель', 'Кабинет']
+        for j in range(0, 4):
+            row = 2
+            column = get_column_letter(i*5 + 1 + j)
+            cell = ws[f'{column}{row}'] 
+            cell.value = words[j]
+            cell.alignment = Alignment( 
+                            horizontal='center',     # Выравнивание по горизонтали 
+                            vertical='center', 
+                            wrap_text=False,        # Отключаем перенос текста 
+                            shrink_to_fit=False       # Выравнивание по вертикали 
+                        ) 
+            cell.font = Font(size=11, italic= True)  
+    ###
+
+    # Динамический ввод предметов + выбор кабинета
+    lessons_in_days = { # Вот это и будем вводить
+        "Пн": [],
+        "Вт": [],
+        "Ср": [],
+        "Чт": [],
+        "Пт": [],
+        "Сб": [],
+        }
+    
+    # Динамический ввод предметов + выбор кабинета
+    lessons_in_days = { # Вот это и будем вводить
+        "Пн": [],
+        "Вт": [],
+        "Ср": [],
+        "Чт": [],
+        "Пт": [],
+        "Сб": [],
+        }
+    
+    for [teacher, group, amount_lesson, people, [day1, time1], [day2, time2], prio] in sch:
+        # 1. Добавляем первый день в любом случае
+        lessons_in_days[day1].append([group, teacher, [time1, amount_lesson], get_minutes(time1), people])
+        
+        # 2. Добавляем второй день ТОЛЬКО если он не является дубликатом первого
+        if not (day1 == day2 and time1 == time2):
+            lessons_in_days[day2].append([group, teacher, [time2, amount_lesson], get_minutes(time2), people])
+
+    for key in lessons_in_days:
+        lessons_in_days[key].sort(key = lambda x: x[3])
+
+    # Выбор кабинета
+   # Выбор кабинета
+    for key, lessons in lessons_in_days.items():
+        if not lessons:
+            continue
+            
+        n = len(lessons)
+        best_assignment = []
+        
+        # 1. Корректная формула проверки пересечения времени
+        # Два урока пересекаются, если максимум из их стартов меньше минимума из их концов
+        def is_overlap(start1, end1, start2, end2):
+            return max(start1, start2) < min(end1, end2)
+
+        # 2. Рекурсивная функция для умного подбора кабинетов
+        # 2. Рекурсивная функция для умного подбора кабинетов
+        def assign_rooms(index, big_room_schedule, medium_room_schedule, small_room_schedule, current_assignment):
+            nonlocal best_assignment
+            
+            if index == n:
+                best_assignment = list(current_assignment)
+                return True
+                
+            start = lessons[index][3]
+            duration = lessons[index][2][1]
+            end = start + duration
+            people = lessons[index][4]
+            
+            # Предлагаем кабинеты от самого маленького подходящего до самого большого
+            options = []
+            if people <= 4:
+                options.append(('Мал', small_room_schedule))
+                options.append(('Ср', medium_room_schedule))
+                options.append(('Бол', big_room_schedule))
+            elif people <= 8:
+                options.append(('Ср', medium_room_schedule))
+                options.append(('Бол', big_room_schedule))
+            else:
+                options.append(('Бол', big_room_schedule))
+                
+            for room_name, room_schedule in options:
+                can_put = True
+                for s_start, s_end in room_schedule:
+                    if is_overlap(start, end, s_start, s_end):
+                        can_put = False
+                        break
+                
+                if can_put:
+                    room_schedule.append((start, end))
+                    current_assignment.append(room_name)
+                    
+                    if assign_rooms(index + 1, big_room_schedule, medium_room_schedule, small_room_schedule, current_assignment):
+                        return True 
+                        
+                    current_assignment.pop()
+                    room_schedule.pop()
+                    
+            return False
+
+        # Запускаем перебор кабинетов для текущего дня
+        assign_rooms(0, [], [], [], [])
+        
+        # 3. Применяем найденное распределение
+        if best_assignment:
+            for i in range(n):
+                lessons[i].append(best_assignment[i])
+        else:
+            # Сюда алгоритм попадет только если ortools выдаст расписание, 
+            # которое в принципе не влезает в 2 кабинета 
+            # (например, если трем группам требуется поменяться кабинетами посреди урока).
+            for i in range(n):
+                lessons[i].append('КОНФЛИКТ')
+    ###   
+
+    colors = [
+        "#7FB5B5", '#77DD77', "#FFB28B", "#BEBD7F", "#AFDAFC", "#E4717A", '#FDF5E6', '#FED6BC', '#F2BFD7', '#E2ECE9' 
+    ]
+    shuffle(colors)
+    from_teacher_to_color = {}
+    for key in t:
+        raw = colors.pop(0)
+        hexval = raw.lstrip('#').upper()
+        if len(hexval) == 6:
+            hexval = 'FF' + hexval
+        from_teacher_to_color[key] = hexval
+
+    from_day_to_number = {
+        "Пн": 0,
+        "Вт": 1,
+        "Ср": 2,
+        "Чт": 3,
+        "Пт": 4,
+        "Сб": 5
+    }
+
+# lessons_in_days[day1].append([group, teacher, [time1, amount_lesson], get_minutes(time1), people, каб])
+
+    for (day, lessons_ordered) in lessons_in_days.items():
+        for i in range(0, len(lessons_ordered)):
+            col = from_day_to_number[day]
+            group = lessons_ordered[i][0]
+            teacher = lessons_ordered[i][1]
+            time = f'{lessons_ordered[i][2][0]}-{get_plus_time(lessons_ordered[i][2][0], lessons_ordered[i][2][1])}'
+            room = lessons_ordered[i][5]
+            # column = get_column_letter(i*5 + 1 + j)
+            words = [group, time, teacher, room]
+            for j in range(0, 4):
+                row = 3 + i
+                column = get_column_letter(col*5 + 1 + j)
+                if j == 0 or j == 2:
+                    cell = ws[f'{column}{row}'] 
+                    cell.value = words[j]
+                    cell.alignment = Alignment( 
+                                    horizontal='center',     # Выравнивание по горизонтали 
+                                    vertical='center', 
+                                    wrap_text=False,        # Отключаем перенос текста 
+                                    shrink_to_fit=False       # Выравнивание по вертикали 
+                                ) 
+                    cell.font = Font(size=11, color='000000')
+                    cell.fill = PatternFill(start_color= from_teacher_to_color[words[2]], end_color= from_teacher_to_color[words[2]], fill_type='solid')
+                else:
+                    cell = ws[f'{column}{row}'] 
+                    cell.value = words[j]
+                    cell.alignment = Alignment( 
+                                    horizontal='center',     # Выравнивание по горизонтали 
+                                    vertical='center', 
+                                    wrap_text=False,        # Отключаем перенос текста 
+                                    shrink_to_fit=False       # Выравнивание по вертикали 
+                                ) 
+                    cell.font = Font(size=11, color='000000')  
+    # Мета данные для создания поверх
+
+    ws_second = wb.create_sheet(title="Доп данные", index=1)
+    count_t = 0
+
+
+    for teacher_name in t:
+        count_local_l = 0
+        row = 1
+        base = 1 + 7*count_t
+        column = get_column_letter(base)
+        cell = ws_second[f'{column}{row}'] 
+        cell.value = teacher_name
+        cell.alignment = Alignment( 
+                        horizontal='center',     # Выравнивание по горизонтали 
+                        vertical='center', 
+                        wrap_text=False,        # Отключаем перенос текста 
+                        shrink_to_fit=False       # Выравнивание по вертикали 
+                    ) 
+        cell.font = Font(size=13, color='000000')
+        cell.fill = PatternFill(start_color= from_teacher_to_color[teacher_name], end_color= from_teacher_to_color[teacher_name], fill_type='solid')
+        # for [teacher, group, amount_lesson, people, [day1, time1], [day2, time2], prio] in sch:
+        for i in range(0, len(sch)):
+            if sch[i][0] == teacher_name:
+                
+                for j in range(1, 7):
+                    row = 2 + count_local_l
+                    column = get_column_letter(base + (j - 1))
+                    cell = ws_second[f'{column}{row}'] 
+
+                    if j in [4, 5]:
+                        cell.value = f'{sch[i][j][0]}, {sch[i][j][1]}'
+                        cell.alignment = Alignment( 
+                                        horizontal='center',     # Выравнивание по горизонтали 
+                                        vertical='center', 
+                                        wrap_text=False,        # Отключаем перенос текста 
+                                        shrink_to_fit=False       # Выравнивание по вертикали 
+                                    ) 
+                        cell.font = Font(size=11, color='000000') 
+                    elif j == 2:
+    
+                        cell.value = f"{sch[i][j]} мин"
+                        cell.alignment = Alignment( 
+                                        horizontal='center',     # Выравнивание по горизонтали 
+                                        vertical='center', 
+                                        wrap_text=False,        # Отключаем перенос текста 
+                                        shrink_to_fit=False       # Выравнивание по вертикали 
+                                    ) 
+                        cell.font = Font(size=11, color='000000') 
+                    elif j == 3:
+                        
+                        cell.value = f"{sch[i][j]} чел"
+                        cell.alignment = Alignment( 
+                                        horizontal='center',     # Выравнивание по горизонтали 
+                                        vertical='center', 
+                                        wrap_text=False,        # Отключаем перенос текста 
+                                        shrink_to_fit=False       # Выравнивание по вертикали 
+                                    ) 
+                        cell.font = Font(size=11, color='000000') 
+                    elif j == 6:
+                        
+                        cell.value = f"Прио {sch[i][j]}"
+                        cell.alignment = Alignment( 
+                                        horizontal='center',     # Выравнивание по горизонтали 
+                                        vertical='center', 
+                                        wrap_text=False,        # Отключаем перенос текста 
+                                        shrink_to_fit=False       # Выравнивание по вертикали 
+                                    ) 
+                        cell.font = Font(size=11, color='000000') 
+                    else:
+                                            
+                        cell.value = sch[i][j]
+                        cell.alignment = Alignment( 
+                                        horizontal='center',     # Выравнивание по горизонтали 
+                                        vertical='center', 
+                                        wrap_text=False,        # Отключаем перенос текста 
+                                        shrink_to_fit=False       # Выравнивание по вертикали 
+                                    ) 
+                        cell.font = Font(size=11, color='000000') 
+                count_local_l += 1
+            
+        count_t += 1
+
+
+    ### 
+    wb.save('Выходные данные/IK-STUDY_TIMETABLE.xlsx')
+###
+
+# Принудитешльная инициализция даже если что-то есть
+def initial(f_in, f_out):
+    if f_in.is_dir():
+        rmtree('Входные данные', ignore_errors=True)
+
+    if f_out.is_dir():
+        rmtree('Выходные данные', ignore_errors=True)
+
+    Path("Входные данные").mkdir(exist_ok=True)
+    Path("Выходные данные").mkdir(exist_ok=True)
+    f_in = Path("Входные данные")
+
+    file_path_classes = f_in / 'classes.txt'
+    file_path_teachers = f_in / 'teachers.txt'
+
+    with open(file_path_classes, "w", encoding="utf-8") as file:
+        file.write("##################################################################################\n**Все, что находиться здесь между решётками, не учитывается самой программой.\n**Данные нужно писать под нижними решётками.\n \nКАК НУЖНО ВВОДИТЬ ДАННЫЕ СРАЗУ ПОСЛЕ НИЖНИХ РЕШЕТОК:\n    Название группы: (кол-во занятий в неделю)\n    Учитель\n    Предпосчтительный ден1 время1 время 2; ...\n    ...\n \n    Название группы n: (кол-во занятий в неделю)\n    ....\n \n**Вводить время от самого выбираемого до менее - достаточно будет 3 варианта\n**Дни недели - Пн, Вт, Ср, Чт, Пт, Сб (только так)\n**В будние дни начало только в 17 или 19, а в субботу как пойдет \nВ конце должно быть обязательно два отступа \n \nНАПРИМЕР:\nЕГЭ мат полупрофи 1: (1)\nМаргарита\nПн 17 19; Вт 19; ... Сб 12 11 14 16\nCр 17 19; Чт 17 19; ...; Сб 12 11 14 16\n \nОГЭ физика любители:\n...\n \n**ВАЖНО ЧТОБЫ ИМЕНА УЧИТЕЛЕЙ ЗДЕСЬ И В СОСЕДНЕЙ ФАЙЛЕ teachers.txt БЫЛИ ОДИНАКОВЫМИ\n**Не должно быть отступов в начале!!!\n**Если занятия одно в неделю, то просто продублийте (Вт 18:00; Вт 18:00)\nУдачи!\n##################################################################################\n\n\n\n")
+  
+        
+    with open(file_path_teachers, "w", encoding="utf-8") as file:
+            file.write("##################################################################################\n**Все, что находиться здесь между решётками, не учитывается самой программой.\n**Данные нужно писать под нижними решётками.\n**ВАЖНО ЧТОБЫ ИМЕНА УЧИТЕЛЕЙ ЗДЕСЬ И В СОСЕДНЕЙ ФАЙЛЕ classes.txt БЫЛИ ОДИНАКОВЫМИ\n**Дни недели - Пн, Вт, Ср, Чт, Пт, Сб (только так)\n \nКАК НУЖНО ВВОДИТЬ ДАННЫЕ СРАЗУ ПОСЛЕ НИЖНИХ РЕШЕТОК:\n    Имя учителя:\n    Пн- свободный час 1; свободный час 2; ... свободный час n\n    ...\n \nНАПРИМЕР:\nМарк:\nПн- 16; 18; 19\nСр- 15; 16; 19\n \nИлья:\nЧт- 16; 20; 21\n...\n \n**Не должно быть отступов в начале!!!\nВ конце должно быть обязательно два отступа\n##################################################################################\n\n\n")
+
+
+# Получение входных данных
+def getting_input_info():
+    classes = {}
+    teachers = {}
+    # "##################################################################################"
+    
+    
+        
+    # {'ЕГЭ мат полупрофи 1': [['Маргарита', 120, 10], [['Пн', '18:00'], ['Пт', '19:00']], [['Вт', '16:00'], ['Сб', '17:00']], [['Ср', '18:00'], ['Сб', '19:00']]]}
+    with open('Входные данные/teachers.txt', 'r', encoding='utf-8') as file:
+            count = 0
+            cur_teacher = ""
+            for line in file:
+                if count == 2:
+                    cur_line = line.strip()
+                    if ":" in cur_line and not cur_teacher:
+                        cur_teacher = cur_line[0:(len(cur_line) - 1)]
+                        teachers[cur_teacher] = {}
+
+                    elif '-' in cur_line:
+                        key = line[0] + line[1]
+                        comb = cur_line[4:]
+                        add = list(comb.split('; '))
+                        teachers[cur_teacher][key] = making_diap(add)
+                    else:
+                        cur_teacher = ""
+            
+                if "##################################################################################" in line:
+                    count += 1
+    count = 0
+    cur_group = ""
+    with open('Входные данные/classes.txt', 'r', encoding='utf-8') as file:
+        for line in file:
+            if count == 2:
+                cur_line = line.strip()
+                if ":" in cur_line and not cur_group:
+                    count_of_students = 0
+                    freaq = {
+                            "Пн": {'17': 0, 
+                                   '19': 0}, 
+                            "Вт": {'17': 0, 
+                                   '19': 0}, 
+                            "Ср": {'17': 0, 
+                                   '19': 0}, 
+                            "Чт": {'17': 0, 
+                                   '19': 0}, 
+                            "Пт": {'17': 0, 
+                                   '19': 0}, 
+                            "Сб": {'10': 0,
+                                   '11': 0,
+                                   '12': 0,
+                                   '13': 0,
+                                   '14': 0,
+                                   '15': 0,
+                                   '16': 0,
+                                   '17': 0,
+                                   '18': 0,
+                                   '19': 0,}, 
+                            }
+                    cur_group = cur_line[0:(len(cur_line) - 5)]
+                    number_of_lessons = int(cur_line[-2])
+                    classes[cur_group] = []
+                elif line == "\n" or line == " \n":
+                    classes[cur_group][0].append(count_of_students)
+                    variants = getting_possible_vars(freaq, number_of_lessons)
+                    for var in variants:
+                        classes[cur_group].append(var)
+                    cur_group = ""
+                elif cur_line.count(';') == 0 and line.strip() in teachers:
+                    classes[cur_group].append([cur_line, 120])
+                elif '*' in cur_line:
+                    count_of_students += 1 
+                else:
+                    count_of_students += 1 
+                    cur_possible_in_day = cur_line.split('; ')
+                    for line_days_and_hours in cur_possible_in_day:
+                        v = line_days_and_hours.split(" ")
+                        for j in range(1, len(v)):
+                            freaq[v[0]][v[j]] += 1
+
+            if "##################################################################################" in line:
+                count += 1
+    return classes, teachers
+# Тут
+###
+
+
+folder_input = Path("Входные данные")
+folder_output = Path("Выходные данные")
+
+povtor_creration = False
+
+# Проверка может это уже доп прогонка
+excel_files = list(folder_output.glob("IK-STUDY_TIMETABLE.xls*"))
+if excel_files:
+    print("->Хотите сделать создание расписания поверх? (Да/Нет)")
+    ans = str(input())
+    if ans == 'Да' or ans == 'да':
+        povtor_creration = True
+        print('Понял')
+    elif ans != 'Нет' or ans == 'нет':
+        print('Буду считать, что "Нет"')
+###
+
+# Начало проги с вводом данных
+if (not folder_input.is_dir()) and (not folder_output.is_dir()):
+    print("Производится инициализация всех нужных файлов")
+    initial(folder_input, folder_output)
+    print("Все готово!")
+elif ((not folder_input.is_dir()) and folder_output.is_dir()) or (folder_input.is_dir() and (not folder_output.is_dir())):
+    print("->Нужных файлов или папок нет, для инициализации нажмите ENTER")
+    input()
+    initial(folder_input, folder_output)
+else:
+    if not povtor_creration:
+        print('->Нужна ли инициализация с удалением всех папок и тп? (Да/Нет)')
+        ans = str(input())
+        if ans == 'Да' or ans == 'да':
+            initial(folder_input, folder_output)
+            print('Всё сделано!')
+        elif ans != 'Нет' or ans == 'нет':
+            print('Буду считать, что "Нет"')
+folder_input = Path("Входные данные")
+folder_output = Path("Выходные данные")
+print('->Введите все входные данные и нажмите ENTER для запуска программы')
+input()
+###
+# Получение входных данных
+protection_to_making = False
+try:
+    input_data = getting_input_info()
+    pass
+except Exception as e:
+    print('!Какая-то ошибка в вводе данных! - исправляйте')
+else:
+    cl = input_data[0]
+    tc = input_data[1]
+    if cl and tc:
+        print('Данные введены корректно, ожидайте')
+        print('>>Классы: ')
+        for group in cl:
+            print(group)
+            print(cl[group])
+            print('-'*10)
+        print('>>Учителя: ')
+        for teacher in tc:
+            print(teacher)
+            print(tc[teacher])
+            print('-'*10)
+        print('')
+        protection_to_making = True
+    else:
+        print('Чего-то не хватает')
+###
+
+# Перебор вариантов в лучшем случае
+if protection_to_making:
+    timetable = making_timetable(cl, tc, povtor_creration)
+    if timetable:
+        showing_timetable(timetable, tc)
+        print(">Смотрите выходные данные, отладочное расписание:")
+        for lessom in timetable:
+            print(lessom)
+###
